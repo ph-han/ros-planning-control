@@ -63,11 +63,14 @@ class LocalPath:
         rospy.init_node('local_path', anonymous=True)
         self.opt_local_path_pub = rospy.Publisher('/opt_path', Path, queue_size=1)
         self.valid_local_path_pub = rospy.Publisher('/valid_local_path', Path, queue_size=1)
+        self.frenet_path_pub = rospy.Publisher('/all_frenet_path', Path, queue_size=1)
 
         self.opt_local_path_msg = Path()
         self.opt_local_path_msg.header.frame_id = '/map'
         self.valid_local_path_msg = Path()
         self.valid_local_path_msg.header.frame_id = '/map'
+        self.frenet_path_msg = Path()
+        self.frenet_path_msg.header.frame_id = '/map'
 
         # rospy.Subscriber("/odom", Odometry, self.odom_callback)
         rospy.Subscriber("/global_path", Path, self.global_path_callback)
@@ -98,7 +101,7 @@ class LocalPath:
 
     def setup_reference_line(self):
         while not self.global_path:
-            rospy.logwarn("Waiting global path")
+            rospy.logdebug_once("Waiting global path")
         rospy.loginfo("find global path")
         total = len(self.global_path.poses)
         for i, pose in enumerate(self.global_path.poses):
@@ -148,15 +151,10 @@ class LocalPath:
         return path_msg
     
     def update_frenet_state(self):
-        """
-        현재 ego_state (차량 상태)를 기반으로 Frenet 좌표 (s0, d0, s1, d1, s2, d2) 갱신
-        reference line은 refer_xlist, refer_ylist만 있어도 OK
-        """
         if self.global_path is None or len(self.refer_xlist) < 2:
             rospy.logwarn("[LocalPath] Reference line not ready.")
             return
 
-        # 1️⃣ world → frenet 변환 (s0, d0)
         self.s0, self.d0 = world2frenet(
             self.ego_state.x,
             self.ego_state.y,
@@ -164,56 +162,48 @@ class LocalPath:
             self.refer_ylist
         )
 
-        # # 2️⃣ reference line 중 ego 위치에 가장 가까운 index 찾기
-        # idx = np.argmin(np.hypot(
-        #     np.array(self.refer_xlist) - self.ego_state.x,
-        #     np.array(self.refer_ylist) - self.ego_state.y
-        # ))
+        idx = np.argmin(np.hypot(
+            np.array(self.refer_xlist) - self.ego_state.x,
+            np.array(self.refer_ylist) - self.ego_state.y
+        ))
 
-        # # 3️⃣ yaw 근사 계산 (도로 진행 방향)
-        # if idx < len(self.refer_xlist) - 1:
-        #     dx = self.refer_xlist[idx + 1] - self.refer_xlist[idx]
-        #     dy = self.refer_ylist[idx + 1] - self.refer_ylist[idx]
-        # else:
-        #     dx = self.refer_xlist[idx] - self.refer_xlist[idx - 1]
-        #     dy = self.refer_ylist[idx] - self.refer_ylist[idx - 1]
+        if idx < len(self.refer_xlist) - 1:
+            dx = self.refer_xlist[idx + 1] - self.refer_xlist[idx]
+            dy = self.refer_ylist[idx + 1] - self.refer_ylist[idx]
+        else:
+            dx = self.refer_xlist[idx] - self.refer_xlist[idx - 1]
+            dy = self.refer_ylist[idx] - self.refer_ylist[idx - 1]
 
-        # theta_r = math.atan2(dy, dx)
+        theta_r = math.atan2(dy, dx)
 
-        # # 4️⃣ 곡률 근사 계산 (3점 미분 근사)
-        # if 1 <= idx < len(self.refer_xlist) - 1:
-        #     x1, y1 = self.refer_xlist[idx - 1], self.refer_ylist[idx - 1]
-        #     x2, y2 = self.refer_xlist[idx], self.refer_ylist[idx]
-        #     x3, y3 = self.refer_xlist[idx + 1], self.refer_ylist[idx + 1]
+        if 1 <= idx < len(self.refer_xlist) - 1:
+            x1, y1 = self.refer_xlist[idx - 1], self.refer_ylist[idx - 1]
+            x2, y2 = self.refer_xlist[idx], self.refer_ylist[idx]
+            x3, y3 = self.refer_xlist[idx + 1], self.refer_ylist[idx + 1]
 
-        #     a = math.hypot(x2 - x1, y2 - y1)
-        #     b = math.hypot(x3 - x2, y3 - y2)
-        #     c = math.hypot(x3 - x1, y3 - y1)
-        #     s = (a + b + c) / 2.0
-        #     area = math.sqrt(max(s * (s - a) * (s - b) * (s - c), 0))
-        #     kappa_r = 4 * area / (a * b * c + 1e-9)
-        # else:
-        #     kappa_r = 0.0
+            a = math.hypot(x2 - x1, y2 - y1)
+            b = math.hypot(x3 - x2, y3 - y2)
+            c = math.hypot(x3 - x1, y3 - y1)
+            s = (a + b + c) / 2.0
+            area = math.sqrt(max(s * (s - a) * (s - b) * (s - c), 0))
+            kappa_r = 4 * area / (a * b * c + 1e-9)
+        else:
+            kappa_r = 0.0
 
-        # # 5️⃣ ego 상태에서 속도, 가속도 가져오기
-        # theta_x = self.ego_state.heading
-        # vx = self.ego_state.vx
-        # vy = self.ego_state.vy
-        # ax = self.ego_state.ax
-        # ay = self.ego_state.ay
+        theta_x = self.ego_state.heading
+        vx = self.ego_state.vx
+        vy = self.ego_state.vy
+        ax = self.ego_state.ax
+        ay = self.ego_state.ay
 
-        # # 6️⃣ yaw 차이 (도로 방향 대비)
-        # delta_theta = theta_x - theta_r
+        delta_theta = theta_x - theta_r
 
-        # # 7️⃣ Frenet 속도 및 가속도 계산
-        # self.s1 = vx * math.cos(delta_theta) + vy * math.sin(delta_theta)
-        # self.d1 = -vx * math.sin(delta_theta) + vy * math.cos(delta_theta)
-        # self.s2 = ax * math.cos(delta_theta) + ay * math.sin(delta_theta) + self.s1 * self.d1 * kappa_r
-        # self.d2 = -ax * math.sin(delta_theta) + ay * math.cos(delta_theta) - self.s1**2 * kappa_r
+        self.s1 = vx * math.cos(delta_theta) + vy * math.sin(delta_theta)
+        self.d1 = -vx * math.sin(delta_theta) + vy * math.cos(delta_theta)
+        self.s2 = ax * math.cos(delta_theta) + ay * math.sin(delta_theta) + self.s1 * self.d1 * kappa_r
+        self.d2 = -ax * math.sin(delta_theta) + ay * math.cos(delta_theta) - self.s1**2 * kappa_r
 
-        # rospy.loginfo_throttle(1.0,
-        #     f"[LocalPath] Frenet updated: s0={self.s0:.2f}, d0={self.d0:.2f}, s1={self.s1:.2f}, d1={self.d1:.2f}"
-        # )
+        rospy.loginfo(f"[LocalPath] Frenet updated: s0={self.s0:.2f}, s1={self.s1:.2f}, s2={self.s2:.2f}, d0={self.d0:.2f}, d1={self.d1:.2f}, d2={self.d2:.2f}")
 
 
     def generate_local_path(self):
@@ -226,6 +216,22 @@ class LocalPath:
                                                                   DESIRED_LAT_POS, 
                                                                   FINAL_DESIRED_SPEED)
         fplist = frenet_paths_to_world(fplist, self.refer_xlist, self.refer_ylist, self.refer_slist)
+
+        # frenet path 시각화 용
+        frenet_paths = Path()
+        frenet_paths.header.frame_id = "map"
+        frenet_paths.header.stamp = rospy.Time.now()
+        for path in fplist:
+            frenet_path = self.frenet_path_to_msg(path)
+            frenet_paths.poses.extend(frenet_path.poses)
+        self.frenet_path_msg = frenet_paths
+
+        fplist = check_valid_path(fplist, None) # None <= obs 들어가야함.
+
+        if not fplist:
+            rospy.logwarn("No valid path.")
+            return
+        
         # valid path 시각화 용
         valid_paths = Path()
         valid_paths.header.frame_id = "map"
@@ -234,17 +240,9 @@ class LocalPath:
             valid_path = self.frenet_path_to_msg(path)
             valid_paths.poses.extend(valid_path.poses)
         self.valid_local_path_msg = valid_paths
-        fplist = check_valid_path(fplist, None) # None <= obs 들어가야함.
-
-        if not fplist:
-            rospy.logwarn("No valid path.")
-            return
-        
-        
 
         opt_path = generate_opt_path(fplist)
         self.opt_local_path_msg = self.frenet_path_to_msg(opt_path)
-        self.update_frenet_state()
         
         
     def publish_path(self):
@@ -252,6 +250,8 @@ class LocalPath:
         while not rospy.is_shutdown():
             self.opt_local_path_msg.header.stamp = rospy.Time.now()
             self.generate_local_path()
+            self.update_frenet_state()
+            self.frenet_path_pub.publish(self.frenet_path_msg)
             self.valid_local_path_pub.publish(self.valid_local_path_msg)
             self.opt_local_path_pub.publish(self.opt_local_path_msg)
             rate.sleep()

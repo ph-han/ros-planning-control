@@ -1,4 +1,5 @@
 import bisect
+import rospy
 from planning_pkg.config import *
 from planning_pkg.frenet import *
 from planning_pkg.frenet_path import FrenetPath
@@ -384,7 +385,7 @@ def check_valid_path(paths, obs):
         elif obs and check_collision(path, obs):
             continue
         valid_paths.append(path)
-    print(f"[Debuf]: {cv}, {ca}, {ck}, {cb}, {co}")
+    rospy.logwarn(f"check_valid_path total: {len(paths)} \n constraint => velo: {cv}, accel: {ca}, kappa: {ck}, back: {cb}, colli: {co}")
     return valid_paths
 
 def generate_opt_path(valid_paths):
