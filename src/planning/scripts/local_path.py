@@ -12,6 +12,7 @@ from planning_pkg.planner import generate_opt_path, \
                                 generate_velocity_keeping_trajectories_in_frenet, \
                                 frenet_paths_to_world, check_valid_path
 from planning_pkg.config import DESIRED_LAT_POS, FINAL_DESIRED_SPEED
+from planning_pkg.msg import PlanVelocityInfo
 
 import math
 
@@ -36,12 +37,12 @@ class VehicleState:
 
 
     def update_from_msg(self, msg):
-        self.x = msg.position.x
-        self.y = msg.position.y
-        self.z = msg.position.z
+        # self.x = msg.position.x
+        # self.y = msg.position.y
+        # self.z = msg.position.z
 
-        # deg → rad 변환
-        self.heading = math.radians(msg.heading)
+        # # deg → rad 변환
+        # self.heading = math.radians(msg.heading)
 
         # velocity
         self.vx = msg.velocity.x
@@ -64,6 +65,7 @@ class LocalPath:
         self.opt_local_path_pub = rospy.Publisher('/opt_path', Path, queue_size=1)
         self.valid_local_path_pub = rospy.Publisher('/valid_local_path', Path, queue_size=1)
         self.frenet_path_pub = rospy.Publisher('/all_frenet_path', Path, queue_size=1)
+        self.plan_velocity_info_pub = rospy.Publisher('/plan_velocity_info', PlanVelocityInfo, queue_size=1)
 
         self.opt_local_path_msg = Path()
         self.opt_local_path_msg.header.frame_id = '/map'
@@ -71,8 +73,10 @@ class LocalPath:
         self.valid_local_path_msg.header.frame_id = '/map'
         self.frenet_path_msg = Path()
         self.frenet_path_msg.header.frame_id = '/map'
+        self.plan_velocity_info_msg = PlanVelocityInfo()
+        
 
-        # rospy.Subscriber("/odom", Odometry, self.odom_callback)
+        rospy.Subscriber("/odom", Odometry, self.odom_callback)
         rospy.Subscriber("/global_path", Path, self.global_path_callback)
         rospy.Subscriber("/Ego_topic", EgoVehicleStatus, self.status_callback)
 
@@ -89,11 +93,11 @@ class LocalPath:
         self.is_status = True
         self.ego_state.update_from_msg(msg)
 
-    # def odom_callback(self, msg):
-    #    odom_quaternion=(msg.pose.pose.orientation.x,msg.pose.pose.orientation.y,msg.pose.pose.orientation.z,msg.pose.pose.orientation.w)
-    #    _, _, self.vehicle_yaw = euler_from_quaternion(odom_quaternion)
-    #    self.ego_state.x = msg.pose.pose.position.x
-    #    self.ego_state.y = msg.pose.pose.position.y
+    def odom_callback(self, msg):
+       odom_quaternion=(msg.pose.pose.orientation.x,msg.pose.pose.orientation.y,msg.pose.pose.orientation.z,msg.pose.pose.orientation.w)
+       _, _, self.ego_state.heading = euler_from_quaternion(odom_quaternion)
+       self.ego_state.x = msg.pose.pose.position.x
+       self.ego_state.y = msg.pose.pose.position.y
 
     def global_path_callback(self, msg):
         if self.global_path == None:
@@ -117,10 +121,21 @@ class LocalPath:
         rospy.loginfo("Reference line setup complete")
 
         rospy.loginfo(f"refer frenet_s setting start.")
-        self.refer_slist = [
-                world2frenet(rx, ry, self.refer_xlist, self.refer_ylist)[0] \
-                    for (rx, ry) in list(zip(self.refer_xlist, self.refer_ylist))
-            ]
+
+        self.refer_slist = []
+        total = len(self.refer_xlist)
+        for i, (rx, ry) in enumerate(zip(self.refer_xlist, self.refer_ylist)):
+            s, _ = world2frenet(rx, ry, self.refer_xlist, self.refer_ylist)
+            self.refer_slist.append(s)
+
+            progress = (i + 1) / total
+            bar_len = 40
+            bar = '=' * int(progress * bar_len)
+            sys.stdout.write(f"\rProgress: [{bar:<{bar_len}}] {progress*100:6.2f}%")
+            sys.stdout.flush()
+
+        sys.stdout.write("\n✅ Frenet conversion complete!\n")
+
         rospy.loginfo(f"refer frenet_s setting done.")
         self.s0, self.d0 = world2frenet(self.ego_state.x, self.ego_state.y, 
                     self.refer_xlist, self.refer_ylist)
@@ -139,7 +154,6 @@ class LocalPath:
             pose.pose.position.y = y
             pose.pose.position.z = 0.0
 
-            # yaw → quaternion 변환
             q = tf.transformations.quaternion_from_euler(0, 0, yaw)
             pose.pose.orientation.x = q[0]
             pose.pose.orientation.y = q[1]
@@ -242,18 +256,23 @@ class LocalPath:
         self.valid_local_path_msg = valid_paths
 
         opt_path = generate_opt_path(fplist)
+        self.plan_velocity_info_msg.current_speed = self.s1 
+        target_v_idx = np.argmin(np.abs(opt_path.s0[1:] - (self.s0 + 1)))
+        rospy.loginfo(f"target v idx: {target_v_idx}")
+        self.plan_velocity_info_msg.target_speed = opt_path.s1[target_v_idx]
         self.opt_local_path_msg = self.frenet_path_to_msg(opt_path)
         
         
     def publish_path(self):
-        rate = rospy.Rate(200)  # 200Hz
+        rate = rospy.Rate(5)  # 5Hz
         while not rospy.is_shutdown():
             self.opt_local_path_msg.header.stamp = rospy.Time.now()
-            self.generate_local_path()
             self.update_frenet_state()
+            self.generate_local_path()
             self.frenet_path_pub.publish(self.frenet_path_msg)
             self.valid_local_path_pub.publish(self.valid_local_path_msg)
             self.opt_local_path_pub.publish(self.opt_local_path_msg)
+            self.plan_velocity_info_pub.publish(self.plan_velocity_info_msg)
             rate.sleep()
 
 if __name__ == "__main__":

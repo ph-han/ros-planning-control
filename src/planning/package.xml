@@ -1,0 +1,21 @@
+<package format="2">
+  <name>planning_pkg</name>
+  <version>0.0.1</version>
+  <description>Planning package for Baqu4 project</description>
+
+  <maintainer email="pilho@hanyang.ac.kr">Pilho Han</maintainer>
+  <license>MIT</license>
+
+  <!-- Build tools -->
+  <buildtool_depend>catkin</buildtool_depend>
+
+  <!-- Message generation -->
+  <build_depend>message_generation</build_depend>
+  <exec_depend>message_runtime</exec_depend>
+
+  <!-- Core dependencies -->
+  <depend>rospy</depend>
+  <depend>std_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
+</package>
