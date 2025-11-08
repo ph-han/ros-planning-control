@@ -112,7 +112,7 @@ def generate_velocity_keeping_trajectories_in_frenet(lat_state, lon_state, opt_d
         desired_speed_list = sorted(set(np.arange(5, desired_speed + 5, 5)) | {desired_speed})
     curr_desired_speed_idx = min(bisect.bisect_left(desired_speed_list, lon_state[1]), len(desired_speed_list) - 1)
     curr_desired_speed = desired_speed_list[curr_desired_speed_idx]
-    dt_0_candidates = [0]
+    dt_0_candidates = [-2, 0]
     st_1_candidates = np.arange(curr_desired_speed + ST_1_MIN, curr_desired_speed + ST_1_MAX + ST_1_STEP, ST_1_STEP)
     for tt in np.arange(v_keep_tt_min, v_keep_tt_max + TT_STEP, TT_STEP):
         lat_traj_list = generate_lateral_movement(*lat_state, tt, v_keep_tt_max, dt_0_candidates)
@@ -221,16 +221,16 @@ def generate_following_trajectories_in_frenet(lat_state, lon_state, lv, opt_d):
             for lon_traj in lon_traj_list:
                 fp = FrenetPath()
 
-                fp.t = lat_traj['t']
-                fp.d0 = lat_traj['d0']
-                fp.d1 = lat_traj['d1']
-                fp.d2 = lat_traj['d2']
-                fp.dj = lat_traj['jerk']
+                fp.t = np.array(lat_traj['t'])
+                fp.d0 = np.array(lat_traj['d0'])
+                fp.d1 = np.array(lat_traj['d1'])
+                fp.d2 = np.array(lat_traj['d2'])
+                fp.dj = np.array(lat_traj['jerk'])
 
-                fp.s0 = lon_traj['s0']
-                fp.s1 = lon_traj['s1']
-                fp.s2 = lon_traj['s2']
-                fp.sj = lon_traj['jerk']
+                fp.s0 = np.array(lon_traj['s0'])
+                fp.s1 = np.array(lon_traj['s1'])
+                fp.s2 = np.array(lon_traj['s2'])
+                fp.sj = np.array(lon_traj['jerk'])
 
                 d_diff = (lat_traj['d0'][-1] - opt_d)**2
                 lat_cost = K_J * sum(np.power(lat_traj['jerk'], 2)) + K_T * tt + K_D * d_diff
@@ -248,90 +248,111 @@ def generate_following_trajectories_in_frenet(lat_state, lon_state, lv, opt_d):
 
 def frenet_paths_to_world(frenet_paths, center_line_xlist, center_line_ylist, center_line_slist):
     for fp in frenet_paths:
+        if len(center_line_xlist) == 0 or len(center_line_slist) == 0:
+            continue
         center_headings = []
         for s, d in zip(fp.s0, fp.d0):
-            x, y, heading = frenet2world(s, d, center_line_xlist, center_line_ylist, center_line_slist)
+            # 세그먼트 끝단을 벗어나는 경우를 막기 위해 s 범위를 제한
+            s_clamped = np.clip(s, center_line_slist[0], center_line_slist[-1])
+            x, y, heading = frenet2world(s_clamped, d, center_line_xlist, center_line_ylist, center_line_slist)
             fp.xlist.append(x)
             fp.ylist.append(y)
             center_headings.append(heading)
 
-        if len(fp.xlist) < 2:
-            fallback_yaw = center_headings[-1] if center_headings else 0.0
-            fp.yawlist.append(fallback_yaw)
-            fp.ds.append(0.0)
-        else:
-            for i in range(len(fp.xlist) - 1):
-                dx = fp.xlist[i + 1] - fp.xlist[i]
-                dy = fp.ylist[i + 1] - fp.ylist[i]
-                step = np.hypot(dx, dy)
-                if step < 1e-4:
-                    # fall back to the center-line heading when the step is nearly zero to avoid yaw spikes at stop
-                    fallback_idx = min(i + 1, len(center_headings) - 1)
-                    yaw = center_headings[fallback_idx]
-                else:
-                    yaw = np.arctan2(dy, dx)
-                fp.yawlist.append(yaw)
-                fp.ds.append(step)
+        num_points = len(fp.xlist)
+        if num_points == 0:
+            continue
 
+        for i in range(len(fp.xlist) - 1):
+            dx = fp.xlist[i + 1] - fp.xlist[i]
+            dy = fp.ylist[i + 1] - fp.ylist[i]
+            fp.yawlist.append(np.arctan2(dy, dx))
+            fp.ds.append(np.hypot(dx, dy))
+
+        # 마지막 yaw는 끝 세그먼트와 동일하게 복제 (길이는 복제하지 않음)
         if fp.yawlist:
             fp.yawlist.append(fp.yawlist[-1])
-        else:
-            fallback_yaw = center_headings[-1] if center_headings else 0.0
-            fp.yawlist.append(fallback_yaw)
 
+        # 누적 s (첫 점의 s=0)
+        s = np.zeros(len(fp.yawlist), dtype=float)
         if fp.ds:
-            fp.ds.append(fp.ds[-1])
-        else:
-            fp.ds.append(0.0)
+            s[1:] = np.cumsum(fp.ds)
 
-        xd = np.gradient(fp.xlist, GEN_T_STEP)
-        yd = np.gradient(fp.ylist, GEN_T_STEP)
+        # 2) yaw 언랩 + s에 대한 미분 => 곡률
+        yaw_unwrapped = np.unwrap(np.asarray(fp.yawlist, dtype=float))
 
-        xdd = np.gradient(xd, GEN_T_STEP)
-        ydd = np.gradient(yd, GEN_T_STEP)
+        # 너무 작은 구간에서 수치폭주 방지: s가 단조 증가하도록 미세 보정
+        # (동일 s가 생기면 gradient가 터지므로, ε만큼 띄워줌)
+        eps = 1e-6
+        s_fix = np.maximum.accumulate(s + np.linspace(0, eps*len(s), len(s)))
 
-        num = xd * ydd - yd * xdd
-        den = (xd**2 + yd**2)**1.5
-        fp.kappa = np.divide(num, den, out=np.zeros_like(num), where=den > 1e-4)
+        # 중앙차분 기반 dyaw/ds (곡률)
+        kappa = np.gradient(yaw_unwrapped, s_fix, edge_order=2)
+
+        # 3) NaN/Inf 방지 + 물리적 클리핑(옵션)
+        kappa = np.where(np.isfinite(kappa), kappa, 0.0)
+        # kappa = np.clip(kappa, -3.0, 3.0)  # 필요시 범위 조절
+
+        fp.kappa = kappa.tolist()
 
     return frenet_paths
 
 def check_collision(path, obstacles):
-    if any(np.array(path.d0) > 4.25) or any(np.array(path.d0) < -4.25):
-        return True
+    """Two-circle collision check - fast and simple!"""
+    if not path.xlist or not path.yawlist or not obstacles:
+        return False
+    
+    # NumPy 배열 변환
+    px_array = np.array(path.xlist)
+    py_array = np.array(path.ylist)
+    yaw_array = np.array(path.yawlist)
+    
+    # 삼각함수 계산 (한 번만!)
+    cos_yaw = np.cos(yaw_array)
+    sin_yaw = np.sin(yaw_array)
+    
+    # 차량 파라미터
+    wheelbase_half = WHEEL_BASE * 0.5  # 1.5m
+    vehicle_radius = OVERALL_WIDTH * 0.5 + 0.3  # 0.946 + 0.3 = 1.246m
+    
+    # 전방/후방 원 중심
+    front_x = px_array + wheelbase_half * cos_yaw
+    front_y = py_array + wheelbase_half * sin_yaw
+    rear_x = px_array - wheelbase_half * cos_yaw
+    rear_y = py_array - wheelbase_half * sin_yaw
+    
+    # Early rejection을 위한 경로 시작점
+    start_x = px_array[0]
+    start_y = py_array[0]
     
     for obstacle in obstacles:
-        obj = obstacle['object']
-
-        if obstacle['type'] != 'vehicle':
-            obs_r = 0.5 * np.hypot(obj.width, obj.height)
-            for x, y in zip(path.xlist, path.ylist):
-                d = np.hypot(obj.x - x, obj.y - y)
-                if d < obs_r + BUBBLE_R:
-                    return True
-
-        else:
-            obs_rear_x = obj.x
-            obs_rear_y = obj.y
-            obs_front_x = obj.x + obj.WHEEL_BASE * np.cos(obj.yaw)
-            obs_front_y = obj.y + obj.WHEEL_BASE * np.sin(obj.yaw)
-            gap = 0
-
-            for x, y, yaw in zip(path.xlist, path.ylist, path.yawlist):
-                ego_rear_x, ego_rear_y = x, y
-                ego_front_x = x + WHEEL_BASE * np.cos(yaw)
-                ego_front_y = y + WHEEL_BASE * np.sin(yaw)
-
-                d_rr = np.hypot(ego_rear_x - obs_rear_x, ego_rear_y - obs_rear_y)
-                d_rf = np.hypot(ego_rear_x - obs_front_x, ego_rear_y - obs_front_y)
-                d_fr = np.hypot(ego_front_x - obs_rear_x, ego_front_y - obs_rear_y)
-                d_ff = np.hypot(ego_front_x - obs_front_x, ego_front_y - obs_front_y)
-
-                if (d_rr + gap < BUBBLE_R + obj.BUBBLE_R or
-                    d_rf + gap < BUBBLE_R + obj.BUBBLE_R or
-                    d_fr + gap < BUBBLE_R + obj.BUBBLE_R or
-                    d_ff + gap < BUBBLE_R + obj.BUBBLE_R):
-                    return True
+        obj = obstacle.get('object')
+        if obj is None:
+            continue
+        
+        ox = float(getattr(obj, 'x', 0.0))
+        oy = float(getattr(obj, 'y', 0.0))
+        
+        # ✅ Early rejection: 너무 멀면 스킵
+        dist_to_start = np.hypot(ox - start_x, oy - start_y)
+        if dist_to_start > 40.0:
+            continue
+        
+        # 장애물 반경
+        obs_w = float(getattr(obj, 'width', 0.0))
+        obs_h = float(getattr(obj, 'height', 0.0))
+        obs_radius = max(0.5 * np.hypot(obs_w, obs_h), 0.4)
+        
+        # 안전 거리
+        safety_dist = vehicle_radius + obs_radius
+        
+        # 전방/후방 원 충돌 체크
+        front_dist = np.hypot(front_x - ox, front_y - oy)
+        rear_dist = np.hypot(rear_x - ox, rear_y - oy)
+        
+        if np.any(front_dist < safety_dist) or np.any(rear_dist < safety_dist):
+            return True
+    
     return False
 
 def is_forward_motion(path, eps=1e-4):
@@ -378,11 +399,13 @@ def check_valid_path(paths, obs):
             continue
         elif any([abs(kappa) > K_MAX for kappa in path.kappa]):
             ck += 1
+            # rospy.logwarn(f"max kappa : {max(abs(path.kappa))}")
             continue
         elif not is_forward_motion(path):
             cb += 1
             continue
         elif obs and check_collision(path, obs):
+            co += 1
             continue
         valid_paths.append(path)
     rospy.logwarn(f"check_valid_path total: {len(paths)} \n constraint => velo: {cv}, accel: {ca}, kappa: {ck}, back: {cb}, colli: {co}")
@@ -391,4 +414,3 @@ def check_valid_path(paths, obs):
 def generate_opt_path(valid_paths):
     opt_path = min(valid_paths, key=lambda p: p.tot_cost)
     return opt_path
-
