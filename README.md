@@ -16,4 +16,10 @@ and **vehicle control** through `Pure Pursuit` and `PID-based longitudinal contr
 
 - **OS**: Ubuntu 20.04  
 - **ROS1**: Noetic  
-- **Simulator**: MORAI 
+- **Simulator**: MORAI
+---
+
+### Planning
+ - [바로가기](./src/planning)
+### Control
+- [바로가기](./src/control) 
