@@ -23,7 +23,5 @@ and **vehicle control** through `Pure Pursuit` and `PID-based longitudinal contr
 - **Simulator**: MORAI
 ---
 
-### Planning
- - [바로가기](./src/planning)
-### Control
-- [바로가기](./src/control) 
+### [Go to planning README.md](./src/planning)
+### [Go to control README.md](./src/control) 
